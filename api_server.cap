@@ -1,0 +1,11 @@
+net.probe on
+net.recon on
+net.sniff on
+
+set api.rest.address 127.0.0.1
+set api.rest.port 8081
+
+set api.rest.username netwatch
+set api.rest.password 192837465
+
+api.rest on 
