@@ -2,8 +2,7 @@ import asyncio
 import aiomysql
 
 from arp_scan import check_device , logger
-from bettercap import start_bettercap, stop_bettercap
-
+from bettercap import start_bettercap, stop_bettercap, collect_trafic_starts
 async def main():
     # create a mysql connection pool using our special agent
     pool = await aiomysql.create_pool(
@@ -21,7 +20,10 @@ async def main():
     if bettercap_process is None:
         logger.error("Bettercap не запустился, демон остановлен.")
         pool.close()
+        await pool.closed()
         return
+
+    traffic_task = asyncio.create_task(collect_trafic_starts(pool))
 
     try:
         while True:
@@ -30,6 +32,12 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Deamon stopped by user ")
     finally:
+        traffic_task.cancel()
+        try:
+            await traffic_task
+        except asyncio.CancelledError:
+            pass
+        await stop_bettercap(bettercap_process)
         pool.close()
         await pool.wait_closed()
 
