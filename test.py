@@ -1,69 +1,47 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-netwatch_fingerprint.py — многосигнальный сканер и классификатор устройств
-в локальной сети.
+test.py — многосигнальный классификатор устройств локальной сети.
 
-Идея: ни один отдельный признак (MAC-вендор, открытый порт, TTL...) не даёт
-100%-й гарантии, что вы поняли, что за устройство перед вами. Поэтому вместо
-жёсткой цепочки if/elif (как было в исходном скрипте) здесь используется
-СИСТЕМА НАКОПЛЕНИЯ УЛИК: каждый источник данных добавляет "голос" за один или
-несколько типов устройства со своим весом, и в конце побеждает тип с
-наибольшей суммой. Это даёт кратно более надёжный результат, потому что
-десять слабых, но независимых признаков вместе почти всегда точнее одного
-"якобы точного".
+это модуль, который вызывает arp_scan.py: для каждого НОВОГО устройства (arp_scan.py уже знает его
+MAC/IP) вызывается identify_devices() и возвращает уточнённый vendor
 
-Источники данных (можно включать/выключать флагами):
-    1. ARP-таблица (ip neigh)                — кто вообще жив в сети
-    2. Bettercap REST API (сессия + события)  — если Bettercap запущен
-    3. Офлайн-база OUI пакета `manuf`         — вендор по MAC (без интернета)
-    4. TCP-порт-скан (20+ портов)             — сигнатуры служб
-    5. HTTP/HTTPS-баннер (Server + <title>)   — веб-морды роутеров/камер/NAS
-    6. NetBIOS Name Service (UDP/137)         — реальное имя ПК на Windows
-    7. mDNS/Bonjour (через zeroconf)          — AirPlay/Chromecast/принтеры...
-    8. SSDP/UPnP (M-SEARCH)                   — вытягиваем XML-описание
-       устройства → производитель/модель напрямую от самого устройства
-    9. TTL из ping                            — грубая, но бесплатная подсказка
-       по семейству ОС (64/128/255)
-   10. Ручные метки known_devices.json        — для приватных/рандомизированных
-       MAC (iOS/Android) это единственный способ получить 100%-ю гарантию,
-       см. пояснение в конце файла.
-   11. Tuya LAN-протокол (UDP 6666/6667)      — самоанонс огромного числа
-       белолейбловых умных розеток/ламп/датчиков (десятки брендов на одной
-       платформе)
-   12. TP-Link Kasa/Tapo (UDP 9999)           — прямой опрос устройства,
-       отвечает точной моделью и алиасом
-   13. Shelly HTTP API (/shelly)              — прямой опрос, отвечает точной
-       моделью реле/розетки
+Идея классификации не менялась: ни один отдельный признак (вендор по
+MAC, открытый порт, TTL...) не даёт 100%-й гарантии типа устройства,
+поэтому вместо жёсткой цепочки if/elif используется система накопления
+улик — каждый источник данных добавляет "голос" за один или несколько
+типов устройства со своим весом, побеждает тип с наибольшей суммой.
+
+Источники данных:
+    1. Офлайн-база OUI пакета `manuf`            — вендор по MAC
+    2. Bettercap REST API (сессия + события)     — если Bettercap запущен
+    3. TCP-порт-скан (20+ портов) + HTTP-баннер   — сигнатуры служб
+    4. NetBIOS Name Service (UDP/137)             — имя ПК на Windows
+    5. mDNS/Bonjour (через zeroconf)              — AirPlay/Chromecast/...
+    6. SSDP/UPnP (M-SEARCH)                       — XML-описание устройства
+    7. TTL из ping                                — грубая подсказка по ОС
+    8. Ручные метки known_devices.json            — для приватных/рандо-
+       мизированных MAC (iOS/Android) единственный способ 100% гарантии
+    9. Tuya LAN-протокол (UDP 6666/6667)          — умные розетки/лампы
+   10. TP-Link Kasa/Tapo (UDP 9999)                — прямой опрос
+   11. Shelly HTTP API (/shelly)                   — прямой опрос
 
 Установка зависимостей:
     pip install manuf zeroconf requests --break-system-packages
 
-Использование:
-    sudo python3 netwatch_fingerprint.py                 # обычный прогон
-    sudo python3 netwatch_fingerprint.py -v               # + все улики по каждому устройству
-    sudo python3 netwatch_fingerprint.py --deep-nmap       # + nmap -O (точнее, но дольше)
-    python3 netwatch_fingerprint.py --label AA:BB:CC:DD:EE:FF "Мой iPhone"
-
-Часть сканов (порты, ARP, ping) не требуют root, но для чтения "ip neigh"
-без предварительного трафика и для наиболее полного скана лучше запускать
-с sudo. Скрипт линуксо-ориентирован (использует `ip neigh`, `ping`).
-
-Важно: используйте только в сети, которой вы владеете или на сканирование
-которой у вас есть разрешение.
+Важно: используйте только в сети, которой вы владеете или на
+сканирование которой у вас есть разрешение.
 """
 
-import argparse
-import ipaddress
 import json
 import os
 import re
-import shutil
 import socket
 import struct
 import subprocess
-import sys
 import time
+import select
+import hashlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -95,10 +73,6 @@ try:
     _PYCRYPTODOME_AVAILABLE = True
 except ImportError:
     _PYCRYPTODOME_AVAILABLE = False
-
-import hashlib
-import select
-
 
 
 BETTERCAP_URL = "http://127.0.0.1:8081/api/session"
@@ -312,32 +286,14 @@ def load_known_devices() -> dict:
 
 
 def save_known_device(mac: str, label: str):
+    """Сохранить постоянную ручную метку для MAC (высшая по весу улика,
+    см. apply_known_device_evidence). CLI для этого больше нет, но функция
+    остаётся — вызвать её можно откуда угодно, например из своего скрипта:
+    `python3 -c "import test; test.save_known_device('AA:BB:...', 'Мой iPhone')"`."""
     data = load_known_devices()
     data[mac.lower()] = label
     with open(KNOWN_DEVICES_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-# =========================================================================
-#                          1. ARP-ТАБЛИЦА (ip neigh)
-# =========================================================================
-
-def get_arp_table() -> dict:
-    """mac(lower) -> ip, из `ip neigh` (Linux)."""
-    devices = {}
-    try:
-        output = subprocess.check_output(["ip", "neigh"], text=True)
-        for line in output.splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and "lladdr" in parts:
-                ip = parts[0]
-                mac = parts[parts.index("lladdr") + 1]
-                if re.match(r"^\d+\.\d+\.\d+\.\d+$", ip) and \
-                   re.match(r"^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$", mac):
-                    devices[mac.lower()] = ip
-    except Exception as e:
-        print(f"[-] Ошибка чтения ARP-таблицы: {e}")
-    return devices
 
 
 def get_default_gateway() -> str:
@@ -352,7 +308,7 @@ def get_default_gateway() -> str:
 
 
 # =========================================================================
-#                          2. BETTERCAP REST API
+#                          BETTERCAP REST API
 # =========================================================================
 
 def fetch_bettercap_data():
@@ -364,8 +320,8 @@ def fetch_bettercap_data():
         r2 = requests.get(EVENTS_URL, auth=BETTERCAP_AUTH, timeout=BETTERCAP_TIMEOUT)
         if r2.status_code == 200:
             events_data = r2.json()
-    except Exception as e:
-        print(f"[-] Bettercap недоступен ({e}) — продолжаю без него.")
+    except Exception:
+        pass  # Bettercap недоступен — продолжаем без него, это не ошибка
     return session_data, events_data
 
 
@@ -400,7 +356,7 @@ def build_ip_events(bc_events) -> dict:
 
 
 # =========================================================================
-#                          3. TCP ПОРТ-СКАН + HTTP-БАННЕР
+#                          TCP ПОРТ-СКАН + HTTP-БАННЕР
 # =========================================================================
 
 def scan_ports(ip: str, ports=SCAN_PORTS, timeout=PORT_TIMEOUT) -> set:
@@ -437,7 +393,7 @@ def grab_http_banner(ip: str, port: int, https: bool):
 
 
 # =========================================================================
-#                          4. NETBIOS NAME SERVICE (UDP/137)
+#                          NETBIOS NAME SERVICE (UDP/137)
 # =========================================================================
 
 def _encode_netbios_name(name: str = "*") -> bytes:
@@ -502,7 +458,7 @@ def _parse_nbns_response(data: bytes):
 
 
 # =========================================================================
-#                          5. mDNS / BONJOUR (через zeroconf)
+#                          mDNS / BONJOUR (через zeroconf)
 # =========================================================================
 
 def _txt_get(properties: dict, *keys) -> str:
@@ -520,7 +476,6 @@ def mdns_discover(sweep_seconds=MDNS_SWEEP_SECONDS) -> dict:
     (например, у Chromecast/AirPlay/HomeKit/Hue устройство само сообщает
     свою модель — это не догадка, а прямой ответ устройства)."""
     if not _ZEROCONF_AVAILABLE:
-        print("[-] Модуль zeroconf не установлен — mDNS пропущен (pip install zeroconf)")
         return {}
 
     results = defaultdict(lambda: {"services": set(), "names": set(), "models": set()})
@@ -571,7 +526,7 @@ def mdns_discover(sweep_seconds=MDNS_SWEEP_SECONDS) -> dict:
 
 
 # =========================================================================
-#                          6. SSDP / UPnP (M-SEARCH)
+#                          SSDP / UPnP (M-SEARCH)
 # =========================================================================
 
 def ssdp_discover(sweep_seconds=SSDP_SWEEP_SECONDS) -> dict:
@@ -601,8 +556,7 @@ def ssdp_discover(sweep_seconds=SSDP_SWEEP_SECONDS) -> dict:
             entry = results.setdefault(addr[0], {})
             entry.update({k: v for k, v in headers.items() if v})
         sock.close()
-    except OSError as e:
-        print(f"[-] SSDP недоступен: {e}")
+    except OSError:
         return results
 
     for ip, info in results.items():
@@ -644,7 +598,7 @@ def _fetch_ssdp_description(location_url: str) -> dict:
 
 
 # =========================================================================
-#                          7. IoT-ЭКОСИСТЕМЫ: Tuya / Kasa / Shelly
+#                          IoT-ЭКОСИСТЕМЫ: Tuya / Kasa / Shelly
 # =========================================================================
 # Это те же самые локальные протоколы обнаружения, которые используют
 # официальные приложения (Smart Life/Tuya Smart, Kasa) при поиске устройств
@@ -697,8 +651,8 @@ def tuya_discover(sweep_seconds=SSDP_SWEEP_SECONDS) -> dict:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind(("0.0.0.0", port))
             socks.append(s)
-        except OSError as e:
-            print(f"[-] Не удалось слушать UDP {port} (Tuya): {e}")
+        except OSError:
+            pass  # порт занят/нет прав — просто теряем этот источник улик
 
     if not socks:
         return results
@@ -777,7 +731,7 @@ def probe_shelly(ip: str, timeout=HTTP_TIMEOUT):
 
 
 # =========================================================================
-#                          8. TTL (ping)
+#                          TTL (ping)
 # =========================================================================
 
 def get_ttl(ip: str) -> Optional[int]:
@@ -792,34 +746,6 @@ def get_ttl(ip: str) -> Optional[int]:
     except Exception:
         pass
     return None
-
-
-# =========================================================================
-#                          9. NMAP OS-DETECTION (опционально, требует root)
-# =========================================================================
-
-def deep_nmap_os_scan(ip: str):
-    if not shutil.which("nmap"):
-        return "", 0
-    try:
-        out = subprocess.run(
-            ["nmap", "-O", "--osscan-guess", "-T4", "--max-os-tries", "1", ip],
-            capture_output=True, text=True, timeout=25,
-        ).stdout
-    except Exception:
-        return "", 0
-
-    m = re.search(r"OS details:\s*(.+)", out)
-    if m:
-        return m.group(1).strip(), 90
-    m = re.search(r"Aggressive OS guesses:\s*(.+)", out)
-    if m:
-        guess = m.group(1).split(",")[0]
-        conf_m = re.search(r"\((\d+)%\)", guess)
-        conf = int(conf_m.group(1)) if conf_m else 50
-        name = re.sub(r"\s*\(\d+%\)", "", guess).strip()
-        return name, conf
-    return "", 0
 
 
 # =========================================================================
@@ -1005,7 +931,7 @@ def apply_bettercap_event_evidence(dev: Device):
 #                          ОРКЕСТРОВКА ОДНОГО УСТРОЙСТВА
 # =========================================================================
 
-def probe_device(mac, ip, gateway_ip, bc_hosts, ip_events, mdns_data, ssdp_data, tuya_data, known, args) -> Device:
+def probe_device(mac, ip, gateway_ip, bc_hosts, ip_events, mdns_data, ssdp_data, tuya_data, known) -> Device:
     dev = Device(ip=ip, mac=mac)
     dev.vendor = get_vendor_by_mac(mac)
 
@@ -1020,22 +946,18 @@ def probe_device(mac, ip, gateway_ip, bc_hosts, ip_events, mdns_data, ssdp_data,
     dev.ssdp_info = ssdp_data.get(ip, {})
     dev.tuya_info = tuya_data.get(ip, {})
 
-    if not args.no_ports:
-        dev.open_ports = scan_ports(ip)
-        if not args.no_http:
-            for port, https in HTTP_BANNER_PORTS.items():
-                if port in dev.open_ports:
-                    server, title = grab_http_banner(ip, port, https)
-                    if server or title:
-                        dev.http_info[port] = (server, title)
-            if not args.no_iot and 80 in dev.open_ports:
-                dev.shelly_info = probe_shelly(ip) or {}
-    if not args.no_nbns:
-        dev.nbns_name, dev.nbns_workgroup = query_nbns(ip)
-    if not args.no_ttl:
-        dev.ttl = get_ttl(ip)
-    if not args.no_iot:
-        dev.kasa_info = query_kasa(ip) or {}
+    dev.open_ports = scan_ports(ip)
+    for port, https in HTTP_BANNER_PORTS.items():
+        if port in dev.open_ports:
+            server, title = grab_http_banner(ip, port, https)
+            if server or title:
+                dev.http_info[port] = (server, title)
+    if 80 in dev.open_ports:
+        dev.shelly_info = probe_shelly(ip) or {}
+
+    dev.nbns_name, dev.nbns_workgroup = query_nbns(ip)
+    dev.ttl = get_ttl(ip)
+    dev.kasa_info = query_kasa(ip) or {}
 
     apply_known_device_evidence(dev, known)
     apply_gateway_evidence(dev, gateway_ip)
@@ -1051,118 +973,50 @@ def probe_device(mac, ip, gateway_ip, bc_hosts, ip_events, mdns_data, ssdp_data,
     apply_ttl_evidence(dev)
     apply_bettercap_event_evidence(dev)
 
-    if args.deep_nmap:
-        os_guess, conf = deep_nmap_os_scan(ip)
-        if os_guess:
-            dev.add_evidence(os_guess, conf, f"nmap -O: {os_guess}")
-
     return dev
 
 
 # =========================================================================
-#                          ВЫВОД ОТЧЁТА
+#                          ТОЧКА ВХОДА ДЛЯ arp_scan.py
 # =========================================================================
 
-def print_report(devices, verbose=False):
-    def ip_key(d):
-        try:
-            return ipaddress.ip_address(d.ip)
-        except ValueError:
-            return ipaddress.ip_address("0.0.0.0")
+def identify_devices(devices: list) -> dict:
+    """
+    devices: [{"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.1.23"}, ...]
+    Возвращает {mac: vendor_строка}, готовую для записи в devices.vendor.
 
-    devices = sorted(devices, key=ip_key)
-    width = 130
-    print("\n" + "=" * width)
-    print(f"{'IP-адрес':<15} | {'MAC-адрес':<17} | {'Тип устройства':<40} | {'Увер.':<6} | {'Имя/вендор'}")
-    print("=" * width)
-    for dev in devices:
-        dtype, conf = dev.classify()
-        label = dev.hostname or dev.vendor
-        print(f"{dev.ip:<15} | {dev.mac:<17} | {dtype:<40} | {conf:>4}% | {label}")
-        if verbose:
-            for line in dev.evidence_log:
-                print(f"        └─ {line}")
-    print("=" * width)
-    if not verbose:
-        print("Подсказка: запустите с флагом -v/--verbose, чтобы увидеть все найденные улики по каждому устройству.")
-
-
-# =========================================================================
-#                          CLI / MAIN
-# =========================================================================
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Многосигнальный сканер и классификатор устройств локальной сети")
-    p.add_argument("--no-bettercap", action="store_true", help="не использовать Bettercap API")
-    p.add_argument("--no-mdns", action="store_true", help="не использовать mDNS/Bonjour")
-    p.add_argument("--no-ssdp", action="store_true", help="не использовать SSDP/UPnP")
-    p.add_argument("--no-nbns", action="store_true", help="не использовать NetBIOS (NBNS)")
-    p.add_argument("--no-http", action="store_true", help="не снимать HTTP/HTTPS баннеры")
-    p.add_argument("--no-ports", action="store_true", help="не сканировать TCP-порты")
-    p.add_argument("--no-ttl", action="store_true", help="не определять TTL через ping")
-    p.add_argument("--no-iot", action="store_true",
-                    help="не опрашивать IoT-протоколы (Tuya/Kasa/Shelly)")
-    p.add_argument("--deep-nmap", action="store_true", help="дополнительно запускать nmap -O (нужен root и nmap)")
-    p.add_argument("--verbose", "-v", action="store_true", help="печатать все улики по каждому устройству")
-    p.add_argument("--label", nargs=2, metavar=("MAC", "НАЗВАНИЕ"),
-                    help="сохранить постоянную ручную метку для MAC и выйти, без сканирования")
-    return p.parse_args()
-
-
-def main():
-    args = parse_args()
-
-    if args.label:
-        mac, label = args.label
-        save_known_device(mac, label)
-        print(f"[+] Сохранено в known_devices.json: {mac.lower()} → {label}")
-        return
+    Это синхронная (блокирующая) функция — как и весь остальной код в
+    этом файле. arp_scan.py вызывает её через asyncio.to_thread, чтобы не
+    блокировать event loop на время mDNS/SSDP-развёрток и порт-сканов.
+    """
+    if not devices:
+        return {}
 
     known = load_known_devices()
 
-    print("[*] Читаю ARP-таблицу (ip neigh)...")
-    arp_devices = get_arp_table()
-    if not arp_devices:
-        print("[-] В ARP-таблице пусто. Сгенерируйте трафик к другим хостам (например, попингуйте подсеть) и повторите.")
-        return
-
-    bc_data, bc_events = ({}, [])
-    if not args.no_bettercap:
-        print("[*] Опрашиваю Bettercap API...")
-        bc_data, bc_events = fetch_bettercap_data()
-
+    bc_data, bc_events = fetch_bettercap_data()
     gateway_ip = ((bc_data or {}).get("gateway", {}) or {}).get("ipv4", "") or get_default_gateway()
     bc_hosts = build_bettercap_hosts(bc_data)
     ip_events = build_ip_events(bc_events)
 
-    mdns_data = {}
-    if not args.no_mdns:
-        print(f"[*] Слушаю mDNS/Bonjour {MDNS_SWEEP_SECONDS} сек...")
-        mdns_data = mdns_discover()
+    mdns_data = mdns_discover()
+    ssdp_data = ssdp_discover()
+    tuya_data = tuya_discover()
 
-    ssdp_data = {}
-    if not args.no_ssdp:
-        print(f"[*] Отправляю SSDP M-SEARCH, слушаю {SSDP_SWEEP_SECONDS} сек...")
-        ssdp_data = ssdp_discover()
-
-    tuya_data = {}
-    if not args.no_iot:
-        print(f"[*] Слушаю самоанонсы Tuya-устройств (UDP 6666/6667) {SSDP_SWEEP_SECONDS} сек...")
-        tuya_data = tuya_discover()
-
-    print(f"[*] Детально опрашиваю {len(arp_devices)} устройств (порты/HTTP/NBNS/TTL/IoT)...")
-    devices = []
-    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(arp_devices)))) as ex:
+    result = {}
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, max(1, len(devices)))) as ex:
         futures = {
-            ex.submit(probe_device, mac, ip, gateway_ip, bc_hosts, ip_events,
-                      mdns_data, ssdp_data, tuya_data, known, args): mac
-            for mac, ip in arp_devices.items()
+            ex.submit(probe_device, d["mac"], d["ip"], gateway_ip, bc_hosts, ip_events,
+                      mdns_data, ssdp_data, tuya_data, known): d["mac"]
+            for d in devices
         }
         for fut in as_completed(futures):
-            devices.append(fut.result())
+            mac = futures[fut]
+            dev = fut.result()
+            device_type, confidence = dev.classify()
+            vendor = dev.vendor or "Неизвестный вендор"
+            if confidence > 0:
+                vendor = f"{vendor} ({device_type}, {confidence}%)"
+            result[mac] = vendor
 
-    print_report(devices, verbose=args.verbose)
-
-
-if __name__ == "__main__":
-    main()
+    return result

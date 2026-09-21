@@ -31,6 +31,7 @@ async def main():
         logger.info("Deamon stopped by user ")
     finally:
         pool.close()
+        await pool.wait_closed()
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -1,7 +1,11 @@
 import asyncio
 import aiohttp
 import logging
+
+import test
+
 from datetime import datetime
+
 
 logger = logging.getLogger("wifi_scanner")
 logger.setLevel(logging.INFO)
@@ -84,18 +88,34 @@ async def check_device(pool):
 
     async with pool.acquire() as conn:              # gives an available connection from the pool to me
         async with conn.cursor() as cursor:         # a tool within the connection through which we send SQL commands and receive results
-            await cursor.execute("SELECT id , mac , is_online FROM devices ")
+            await cursor.execute("SELECT id , mac ,vendor, is_online FROM devices ")
             db_devices = await cursor.fetchall()                                                    # we take all found lines from the databese
-            db_macs = {row[1]: {"id":row[0], "is_online":row[2]} for row in db_devices}             # transform the resulting list from teh databese into a convinient dictionary
+            db_macs = {row[1]: {"id":row[0], "vendor":row[2], "is_online":row[3]} for row in db_devices}             # transform the resulting list from teh databese into a convinient dictionary
 
             current_macs = {dev["mac"] for dev in current_device}
+
+            new_devices = [dev for dev in current_device if dev["mac"] not in db_macs]
+
+
+            try:                                                                                                    # executing asynchronous code within an asynchronous deamon without  breaking the asynchronous nature
+                fingerprinted_venders = await asyncio.to_thread(test.identify_devices , new_devices)         #
+            except Exception:                                                                                      #
+                logger.exception("test.py: error detecting devices ")
+                return
 
             for cur in current_device:
                 mac = cur["mac"]
                 ip = cur["ip"]
-                vendor = cur["vendor"]
+
 
                 if mac not in db_macs:
+
+                    if mac not in fingerprinted_venders:
+                        logger.warning(f"test.py: could not identify the device: {mac} " )
+                        continue
+
+                    vendor = fingerprinted_venders[mac]
+
                     await cursor.execute(
                      """
                      INSERT INTO devices (mac, ip, vendor, first_seen, last_seen, is_online) 
@@ -116,6 +136,7 @@ async def check_device(pool):
 
                 else:
                     dev_id = db_macs[mac]["id"]
+                    vendor = db_macs[mac]["vendor"]
                     was_online = db_macs[mac]["is_online"]
 
                     await cursor.execute(

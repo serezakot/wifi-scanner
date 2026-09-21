@@ -11,13 +11,13 @@ async def start_bettercap():
         stderr=asyncio.subprocess.DEVNULL,
     )
 
-    # ждём пока REST API bettercap ответит — значит caplet отработал и он реально жив
-    auth = aiohttp.BasicAuth("netwatch", "192837465")
-    async with aiohttp.ClientSession(auth=auth) as session:
+# waiting for the bettercap REST API to respond this means the caplet has finished executing and it is turly up and runnign
+    auth = aiohttp.BasicAuth("netwatch", "192837465")                       # handles basic authentication ( HTTP Basic Authentication)
+    async with aiohttp.ClientSession(auth=auth) as session:                                 # open an HTTP session for sending requests ( with the login and password from auth )
         for _ in range(15):
             await asyncio.sleep(1)
             try:
-                async with session.get("http://127.0.0.1:8081/api/session", timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                async with session.get("http://127.0.0.1:8081/api/session", timeout=aiohttp.ClientTimeout(total=2)) as resp:   # make a test request to the local bettercap api with maximum response timeout of 2 seconds
                     if resp.status == 200:
                         logger.info("Bettercap успешно запущен, REST API отвечает")
                         return process
