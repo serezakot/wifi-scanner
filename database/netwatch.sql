@@ -39,11 +39,16 @@ CREATE INDEX idx_dns_device_time ON dns_logs(device_id, timestamp);
 CREATE TABLE traffic_stats (
     id INT PRIMARY KEY AUTO_INCREMENT,
     device_id INT NOT NULL,
+    session_id INT,
     timestamp DATETIME NOT NULL,
     bytes_in BIGINT UNSIGNED NOT NULL DEFAULT 0,
     bytes_out BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES device_sessions(id) ON DELETE SET NULL
 );
+
+CREATE INDEX index_trafic_timestamp on traffic_stats(timestamp);
+CREATE INDEX index_trafic_device on traffic_stats(device_id , timestamp);
 
 CREATE TABLE port_scans (
     id INT PRIMARY KEY AUTO_INCREMENT,

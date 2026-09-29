@@ -1,10 +1,10 @@
 import asyncio
 import aiohttp
 import logging
-
-import test
-
 from datetime import datetime
+
+import vendor_recognition
+import traffic_colector
 
 
 logger = logging.getLogger("wifi_scanner")
@@ -60,7 +60,7 @@ async def scan():
         stderr=asyncio.subprocess.PIPE   # for the error stream
     )
 
-    stdout , stderr = await proces.communicate()
+    stdout , stderr = await proces.communicate() #feeds input
 
     return stdout.decode("utf-8")
 
@@ -88,30 +88,26 @@ async def check_device(pool):
 
     async with pool.acquire() as conn:              # gives an available connection from the pool to me
         async with conn.cursor() as cursor:         # a tool within the connection through which we send SQL commands and receive results
-            await cursor.execute("SELECT id , mac ,vendor, is_online FROM devices ")
+            await cursor.execute("SELECT id , mac ,vendor, is_online , ip FROM devices ")
             db_devices = await cursor.fetchall()                                                    # we take all found lines from the databese
-            db_macs = {row[1]: {"id":row[0], "vendor":row[2], "is_online":row[3]} for row in db_devices}             # transform the resulting list from teh databese into a convinient dictionary
-
+            db_macs = {row[1]: {"id":row[0], "vendor":row[2], "is_online":row[3], "ip":row[4]} for row in db_devices}             # transform the resulting list from teh databese into a convinient dictionary
             current_macs = {dev["mac"] for dev in current_device}
 
             new_devices = [dev for dev in current_device if dev["mac"] not in db_macs]
 
-
-            try:                                                                                                    # executing asynchronous code within an asynchronous deamon without  breaking the asynchronous nature
-                fingerprinted_venders = await asyncio.to_thread(test.identify_devices , new_devices)         #
-            except Exception:                                                                                      #
-                logger.exception("test.py: error detecting devices ")
+            try:
+                fingerprinted_venders = await asyncio.to_thread(vendor_recognition.identify_devices , new_devices)         # executing asynchronous code within an asynchronous deamon without  breaking the asynchronous nature
+            except Exception:
+                logger.exception("vendor_recognition.py: error detecting devices ")
                 return
 
             for cur in current_device:
                 mac = cur["mac"]
                 ip = cur["ip"]
 
-
                 if mac not in db_macs:
-
                     if mac not in fingerprinted_venders:
-                        logger.warning(f"test.py: could not identify the device: {mac} " )
+                        logger.warning(f"vendor_recognition.py: could not identify the device: {mac} " )
                         continue
 
                     vendor = fingerprinted_venders[mac]
@@ -127,25 +123,27 @@ async def check_device(pool):
 # OPEN A SESSION
                     await cursor.execute("""INSERT INTO device_sessions (device_id, started_at) VALUES (%s,      %s)""",
                                                                                                     (dev_id  , now) )
+                    session_id = cursor.lastrowid              # take the unique numeric ID
+
+                    await traffic_colector.add_device_rules(ip)
+                    traffic_colector.set_session(ip, session_id)
+
                     logger.info(
-                        "NEW DEVICE DETECTED\n"
-                        f"IP: {ip}\n"
-                        f"MAC: {mac}\n"
-                        f"Vendor: {vendor}"
-                       )
+                        "NEW DEVICE DETECTED\nIP: %s\nMAC: %s\nVendor: %s",
+                        ip, mac, vendor
+                    )
 
                 else:
                     dev_id = db_macs[mac]["id"]
-                    vendor = db_macs[mac]["vendor"]
                     was_online = db_macs[mac]["is_online"]
 
                     await cursor.execute(
                            """
                         UPDATE devices
-                        SET ip = %s, vendor = %s , last_seen = %s , is_online = TRUE
+                        SET ip = %s, last_seen = %s , is_online = TRUE
                         WHERE id = %s 
                         """,
-                        (ip , vendor, now , dev_id)
+                        (ip , now , dev_id)
                     )
 
                     if not was_online:
@@ -153,19 +151,22 @@ async def check_device(pool):
                             "INSERT INTO device_sessions (device_id , started_at) VALUES (%s , %s )",
                                                                                         (dev_id , now)
                         )
+                        session_id = cursor.lastrowid
+
+                        await traffic_colector.add_device_rules(ip)
+                        traffic_colector.set_session(ip, session_id)
 
             for mac, data in db_macs.items():
                 if mac not in current_macs and data["is_online"]:
                     dev_id = data["id"]
+                    ip = data["ip"]
                     await cursor.execute(
                         "UPDATE devices SET is_online = FALSE WHERE id = %s",
                                                                     (dev_id,)
                     )
 
-
-
-
-
+                    await traffic_colector.remove_device_rules(ip)
+                    traffic_colector.clear_session(ip)
 
 
 

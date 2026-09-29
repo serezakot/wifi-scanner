@@ -20,8 +20,11 @@ async def fetch_bettercap_session():
 
 
 async def start_bettercap():
+    caplet_path = "/home/sergiy-kot/Desktop/education/Net_Sentinel/api_server.cap"
+    logger.info(f"Пробуем запустить Bettercap с файлом: {caplet_path}")
     process = await asyncio.create_subprocess_exec(
-        "sudo", "/usr/local/bin/bettercap", "-caplet", "./api_server.cap",
+        "sudo", "/usr/local/bin/bettercap", "-iface", "wlp1s0", "-caplet", caplet_path,
+        stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
@@ -49,47 +52,6 @@ async def stop_bettercap(process):
         await asyncio.wait_for(process.wait(), timeout=5)
     except asyncio.TimeoutError:
         process.kill()
-
-
-
-async def traffic_snapshot_once(pool):
-    session_data = await fetch_bettercap_session()
-    if not session_data:
-        logger.error("traffic_stats: Bettercap недоступен, пропускаю снятие счётчиков")
-        return
-    traffic = session_data.get("packets", {}).get("traffic", {}) # look for the "packets and traffic" key : if it's not there don't crack the program instead create an empty {}
-    if not traffic:
-        return
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    async with pool.acquire() as conn:              # gives an available connection from the pool to me
-        async with conn.cursor() as cursor:         # a tool within the connetion through wich we send SQL commands and recive results
-            await cursor.execute("SELECT id , ip from devices")
-            id_ip_devices = cursor.fetchall()           # we take all found lines from the databese
-            id_by_ip = {ip: dev_id for dev_id, ip in await id_ip_devices}
-
-            for ip , stats in traffic.items():
-                dev_id = id_by_ip.get(ip)
-                if dev_id is None:
-                    continue     # the device hasn't appeared in "devices " yet (waiting rfor 'arp-scan)
-                await cursor.execute(
-                    """
-                    INSERT INTO traffic_stats (device_id,  timestamp, bytes_in, bytes_out)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                            (dev_id, now , stats.get("received", 0), stats.get("sent", 0)),
-                )
-
-
-
-async def collect_trafic_starts(pool):
-    while True:
-        await asyncio.sleep(60)
-        try:
-            await traffic_snapshot_once(pool)
-        except Exception:
-            logger.exception("traffic_stats: ошибка снятия счётчиков")
-
 
 
 
