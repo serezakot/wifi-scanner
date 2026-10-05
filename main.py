@@ -27,7 +27,7 @@ async def main():
 
     await setup_iptables()
 
-    bettercap_process = await  start_bettercap()
+    bettercap_process = await  start_bettercap(pool)
     if bettercap_process is None:
         logger.error("Bettercap не запустился, демон остановлен.")
         pool.close()

@@ -5,6 +5,7 @@ from datetime import datetime
 
 import vendor_recognition
 import traffic_colector
+import bettercap
 
 
 logger = logging.getLogger("wifi_scanner")
@@ -167,6 +168,9 @@ async def check_device(pool):
 
                     await traffic_colector.remove_device_rules(ip)
                     traffic_colector.clear_session(ip)
+
+                    bettercap.clear_device_cache(ip)
+                    bettercap.clear_device_cache(data.get("hostname", ""))
 
 
 

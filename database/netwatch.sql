@@ -29,9 +29,11 @@ CREATE TABLE device_sessions (
 CREATE TABLE dns_logs (
     id INT PRIMARY KEY AUTO_INCREMENT,
     device_id INT NOT NULL,
+    session_id INT,
     timestamp DATETIME NOT NULL,
     domain VARCHAR(255) NOT NULL,
-    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES device_sessions(id) ON DELETE SET NULL
 );
 
 CREATE INDEX idx_dns_device_time ON dns_logs(device_id, timestamp);
