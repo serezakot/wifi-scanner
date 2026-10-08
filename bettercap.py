@@ -5,22 +5,65 @@ import re
 import aiohttp
 import tldextract
 from datetime import datetime
-from traffic_colector import _active_sessions   # It instantly identifies the device's current session number and can record it, along with the domain, in the database.
+from traffic_colector import _active_sessions   # It instantly identifies the device's current session number and can record it along with the domain in the database
+
+
+
+_RE_ANSI = re.compile(r'\x1b\[[0-9;]*m')
+
+## Smart subdomain trimming (api.site.co.uk -> site.co.uk).
+_extractor = tldextract.TLDExtract(cache_dir=False)  # eTLD+1 без сети
+
+_blocklist: set[str] = set()  # to be filled in in load_blocklist()
+
+async def load_blocklist() -> None:
+    """downloads OISD (800 000+ ad/tracking/CDN domains) into _blocklist
+    falls back silently if the network is unavailable"""
+    global _blocklist
+    url = "https://big.oisd.nl/domains"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status != 200:
+                    logger.warning("Blocklist: HTTP %d, running without it", resp.status)
+                    return
+                text = await resp.text()
+        domains = set()  # onli str
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("!") or line.startswith("#"):
+                continue
+            if line.startswith("0.0.0.0 ") or line.startswith("127.0.0.1 "):
+                line = line.split()[1]
+            domains.add(line.lower())
+        _blocklist = domains
+        logger.info("Blocklist loaded: %d domains", len(_blocklist))
+    except Exception:
+        logger.exception("Blocklist download failed — running without it")
+
+
+def _is_blocked(domain: str) -> bool:
+    """Rreturns True if domain or any of its parent domdains is in the blocklist"""
+    parts = domain.lower().split(".")
+    for i in range(len(parts) - 1):
+        if ".".join(parts[i:]) in _blocklist:
+            return True
+    return False
 
 
 logger = logging.getLogger("wifi_scanner.traffic")
 
 
-#записываем сюда кеш что бы не лезть каждый раз в sql
+# cache the data here to avoid querying SQL every time
 _device_cache = {}
 
 def clear_device_cache(ip_or_host:str):
-    """Removes the IP from the cache. Called from arp_scan.py when the device goes offline."""
+    """removes the IP from the cache called from arp_scan.py when the device goes offline"""
     _device_cache.pop(ip_or_host, None)
 
 
 async def get_device_id(pool , ip ):
-    """Returns the device_id based on the IP address. It checks the cache first, then the database."""
+    """returns the device_id based on the IP address it checks the cache first then the database"""
 
     if ip in _device_cache:
         return _device_cache[ip]
@@ -34,13 +77,13 @@ async def get_device_id(pool , ip ):
             result = await cursor.fetchone()
             if result:
                 _device_cache[ip] = result[0]
-                return result[0]
+                return result[0]    # will be recorded in dns_log
     return None
 
 def parse_event(event: dict):
-    """Extracts (device_ip, domain) from a Bettercap event.
-    Returns None if the event is not relevant (invalid tag, missing domain,
-    service domain). This is the only place where the decision on what to record is made."""
+    """extracts (device_ip, domain) from a bbetercap event
+    returns None if the event is not relevant (invalid tag, missing domain
+    service domain) this is the only place where the decision on what to record is made"""
     tag = event.get("tag", "")
     data = event.get("data")
 
@@ -53,16 +96,24 @@ def parse_event(event: dict):
     if not isinstance(message, str):
         return None
 
+    # DNS  is disabled — too much background noise from applications
+    # SNI  yields only actual TCP connections, which are far fewer in numbe
+    # if tag == "net.sniff.dns":
+    #     device_ip = data.get("to", "")
+    #     m = re.compile(r'\x1b\[33m(.*?)\x1b\[0m').search(message)
+    #     domain = m.group(1).strip() if m else ""
+
+
     if tag == "net.sniff.dns":
         # data.to = IP of the device that requested the domain
         # data.from = 192.168.0.1 (router responding)
         device_ip = data.get("to", "")
-        m = re.compile(r'\x1b\[33m(.*?)\x1b\[0m').search(message)
+        m = re.compile(r'\x1b\[33m(.*?)\x1b\[0m').search(message)  #if it finds it it writes the result to a variable
         domain = m.group(1).strip() if m else ""
 
     else:   #     net.sniff.https
         # data.from = IP of the device that opened the connection
-        # domain in message: "sni 192.168.0.2 > https://example.com"
+        # domain in message: "sni 192.168.0.2 > https://example.com\x1b[0m"
         device_ip = data.get("from")
         m = re.compile(r'https?://([^/\s:]+)').search(message)
         domain = m.group(1).strip() if m else ""
@@ -70,7 +121,14 @@ def parse_event(event: dict):
     if not device_ip or not domain:
         return None
 
+    domain = _RE_ANSI.sub("", domain)
+
     if any(domain.endswith(s) for s in (".local", ".arpa", ".internal")):
+        return None
+
+    domain = _extractor(domain).top_domain_under_public_suffix or domain
+
+    if _is_blocked(domain):
         return None
 
     return device_ip, domain
@@ -116,7 +174,7 @@ async def pool_bettercap_events(pool):
 
                     events = await resp.json()
 
-                seen_this_batch: set[tuple] = set()
+                seen_this_batch = set()   # wait tuple
                 now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 written = 0
                 newest_time = _last_event_time
@@ -129,11 +187,12 @@ async def pool_bettercap_events(pool):
                     except (ValueError, TabError):
                         continue
 
-                    #Skip events that have already been processed
+                    #Bettercap often returns the entire history since startup via `/api/events`;
+                    # this block filters out everything that happened in the past. We only take events that are newer than our `_last_event_time` marker.
                     if event_time <= _last_event_time:
                         continue
 
-                    # Store the latest timestamp from this batch
+                    # store the glatest timestamp from this batch
                     if event_time > newest_time:
                         newest_time = event_time
 
@@ -143,6 +202,8 @@ async def pool_bettercap_events(pool):
 
                     device_ip , domain = parsed
 
+
+
                     key = (device_ip, domain)
                     if key in seen_this_batch:
                         continue
@@ -150,7 +211,7 @@ async def pool_bettercap_events(pool):
 
 
                     if await save_domain_log(pool, device_ip, domain, now):
-                        logger.info("dns_logs: %s → %s", device_ip, domain)
+                        logger.info("dns_logs: %s, %s", device_ip, domain)
                         written += 1
 
                 if newest_time > _last_event_time:
@@ -181,7 +242,7 @@ async def start_bettercap(pool):
         stderr=asyncio.subprocess.DEVNULL,
     )
     await killer.wait()
-    await asyncio.sleep(1)  # ждём пока порт освободится
+    await asyncio.sleep(1)
 
     caplet_path = "/home/sergiy-kot/Desktop/education/Net_Sentinel/api_server.cap"
     logger.info(f"Пробуем запустить Bettercap с файлом: {caplet_path}")
@@ -200,6 +261,7 @@ async def start_bettercap(pool):
         await asyncio.sleep(1)
         if await fetch_bettercap_session() is not None:
             logger.info("Bettercap успешно запущен, REST API отвечает")
+            await load_blocklist()
             asyncio.create_task(pool_bettercap_events(pool))
             return process
 
