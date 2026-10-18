@@ -97,7 +97,7 @@ async def check_device(pool):
             new_devices = [dev for dev in current_device if dev["mac"] not in db_macs]
 
             try:
-                fingerprinted_venders = await asyncio.to_thread(vendor_recognition.identify_devices , new_devices)         # executing asynchronous code within an asynchronous deamon without  breaking the asynchronous nature
+                fingerprinted_venders = await asyncio.to_thread(vendor_recognition.identify_devices, new_devices)         # executing asynchronous code within an asynchronous deamon without  breaking the asynchronous nature
             except Exception:
                 logger.exception("vendor_recognition.py: error detecting devices ")
                 return
@@ -171,21 +171,4 @@ async def check_device(pool):
 
                     bettercap.clear_device_cache(ip)
                     bettercap.clear_device_cache(data.get("hostname", ""))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

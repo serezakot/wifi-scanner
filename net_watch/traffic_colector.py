@@ -38,6 +38,15 @@ async def setup_iptables():
     logger.info("iptables: форвардинг и NAT настроены, счётчики обнулены")
 
 
+
+async def block_device_traffic(ip: str) -> None:
+    for direction in ("-s", "-d"):
+        await asyncio.create_subprocess_exec("sudo", "iptables", "-I", "FORWARD", "1", direction, ip, "-j", "DROP")
+
+async def unblock_device_traffic(ip: str) -> None:
+    for direction in ("-s", "-d"):
+        await asyncio.create_subprocess_exec("sudo", "iptables", "-D", "FORWARD", direction, ip, "-j", "DROP")
+
 async def add_device_rules(ip: str):
     """
     adds a counter rule for the device's upload/download traffic

@@ -8,10 +8,9 @@ from datetime import datetime
 from traffic_colector import _active_sessions   # It instantly identifies the device's current session number and can record it along with the domain in the database
 
 
-
 _RE_ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
-## Smart subdomain trimming (api.site.co.uk -> site.co.uk).
+## smart subdomain trimming (api.site.co.uk -> site.co.uk)
 _extractor = tldextract.TLDExtract(cache_dir=False)  # eTLD+1 без сети
 
 _blocklist: set[str] = set()  # to be filled in in load_blocklist()
@@ -61,6 +60,18 @@ def clear_device_cache(ip_or_host:str):
     """removes the IP from the cache called from arp_scan.py when the device goes offline"""
     _device_cache.pop(ip_or_host, None)
 
+
+_monitoring_enable = set()
+
+def pause_monitoring(ip):
+    _monitoring_enable.discard(ip)
+def resume_monitoring(ip):
+    _monitoring_enable.add(ip)
+def is_monitoring_paused(ip):
+    """# At startup, the set is empty → ip not in _monitoring_enabled → True → skip"""
+    return ip not in _monitoring_enable
+def list_enabled() -> list[str]:
+    return list(_monitoring_enable)
 
 async def get_device_id(pool , ip ):
     """returns the device_id based on the IP address it checks the cache first then the database"""
@@ -135,7 +146,7 @@ def parse_event(event: dict):
 
 
 async def save_domain_log(pool, device_ip:str , domain:str, now):
-    """Writes a single entry to dns_logs. Returns True if the write succeeded."""
+    """wrrrites a single entry to dns_logs. Returns True if the write succeedd"""
     device_id = await get_device_id(pool, device_ip)
     session_id = _active_sessions.get(device_ip)
 
@@ -158,13 +169,13 @@ async def save_domain_log(pool, device_ip:str , domain:str, now):
     return True
 
 async def pool_bettercap_events(pool):
-    auth = aiohttp.BasicAuth("netwatch", "192837465")
+    auth = aiohttp.BasicAuth("YOUR_LOGIN", "YOUR_PASSWORD")
     await asyncio.sleep(10)
 
     # Time of the last processed event.
     _last_event_time = datetime.now()
 
-    async with aiohttp.ClientSession(auth=aiohttp.BasicAuth("netwatch", "192837465")) as session:
+    async with aiohttp.ClientSession(auth=aiohttp.BasicAuth("YOUR_LOGIN", "YOUR_PASSWORD")) as session:
         while True:
             try:
                 async with session.get("http://127.0.0.1:8081/api/events", timeout=aiohttp.ClientTimeout(total=2)) as resp:
@@ -202,7 +213,12 @@ async def pool_bettercap_events(pool):
 
                     device_ip , domain = parsed
 
+                    if is_monitoring_paused(device_ip):
+                        continue
 
+                    from control_api import is_blocked_ips
+                    if is_blocked_ips(device_ip):
+                        continue
 
                     key = (device_ip, domain)
                     if key in seen_this_batch:
@@ -224,7 +240,7 @@ async def pool_bettercap_events(pool):
 
 
 async def fetch_bettercap_session():
-    auth = aiohttp.BasicAuth("netwatch", "192837465")                       # handles basic authentication ( HTTP Basic Authentication)
+    auth = aiohttp.BasicAuth("YOUR_LOGIN", "YOUR_PASSWORD")                       # handles basic authentication ( HTTP Basic Authentication)
     async with aiohttp.ClientSession(auth=auth) as session:                                 # open an HTTP session for sending requests ( with the login and password from auth )
         try:
             async with session.get("http://127.0.0.1:8081/api/session", timeout=aiohttp.ClientTimeout(total=2)) as resp:  # make a test request to the local bettercap api with maximum response timeout of 2 seconds
@@ -244,7 +260,7 @@ async def start_bettercap(pool):
     await killer.wait()
     await asyncio.sleep(1)
 
-    caplet_path = "/home/sergiy-kot/Desktop/education/Net_Sentinel/api_server.cap"
+    caplet_path = "/api_server.cap"
     logger.info(f"Пробуем запустить Bettercap с файлом: {caplet_path}")
     process = await asyncio.create_subprocess_exec(
         "sudo", "/usr/local/bin/bettercap", "-iface", "wlp1s0", "-caplet", caplet_path
