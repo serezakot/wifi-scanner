@@ -208,7 +208,6 @@ NetWatch currently keeps its configuration as constants at the top of each file 
 | `api_server.cap` | `set api.rest.username` / `set api.rest.password` — set these to the **same** credentials referenced above; also set `arp.spoof.targets` to your own LAN range |
 | `traffic_colector.py`, `bettercap.py`, `api_server.cap` | the network interface name (`wlp1s0`) — replace with your own, found via `ip link` |
 
-> ⚠️ As uploaded, `bettercap.py`'s two `BasicAuth("YOUR_LOGIN", "YOUR_PASSWORD")` calls are placeholder text, while `vendor_recognition.py` already has real-looking credentials (`"netwatch"`, `"192837465"`). These need to match each other and the `.cap` file, or Bettercap's REST API will reject the daemon's requests with 401s.
 
 ### 5. Run the daemon
 
