@@ -126,3 +126,156 @@ To make sure that drawing the interface and the user's work with tables never de
 
 - The TUI reads session history, daily download statistics (in gigabytes), and domain logs directly from MySQL.
 - For real-time commands, it uses an internal asynchronous REST API server (`127.0.0.1:9090`, built on `aiohttp`). These commands include: block the internet for a device, pause DNS monitoring, or check the daemon's current memory status.
+
+## 🚀 Usage / Quickstart
+
+### 1. System requirements
+
+NetWatch talks directly to the Linux network stack, so it needs root and a few system tools alongside the Python packages:
+
+- Linux, Python 3.10+
+- Root privileges (iptables, ARP spoofing, and packet forwarding all require it)
+- System packages: `arp-scan`, [Bettercap](https://www.bettercap.org/), a running MySQL/MariaDB server
+- A Wi-Fi/Ethernet interface you're allowed to run ARP spoofing on — see the note below
+
+### 2. Install the Python dependencies
+
+```bash
+pip install -r requirements.txt --break-system-packages
+```
+
+### 3. Create the database
+
+Create the `netwatch` database and its 4 tables (see the schema in the architecture diagram above):
+
+```sql
+CREATE DATABASE netwatch CHARACTER SET utf8mb4;
+USE netwatch;
+
+CREATE TABLE devices (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    mac           VARCHAR(17) NOT NULL UNIQUE,
+    ip            VARCHAR(45),
+    vendor        VARCHAR(255),
+    os_type       VARCHAR(100),
+    first_seen    DATETIME,
+    last_seen     DATETIME,
+    is_online     BOOLEAN DEFAULT FALSE,
+    is_blocked    BOOLEAN DEFAULT FALSE,
+    is_monitored  BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE device_sessions (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    device_id   INT NOT NULL,
+    started_at  DATETIME NOT NULL,
+    ended_at    DATETIME,
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+);
+
+CREATE TABLE dns_logs (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    device_id   INT NOT NULL,
+    session_id  INT NOT NULL,
+    timestamp   DATETIME NOT NULL,
+    domain      VARCHAR(255) NOT NULL,
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES device_sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE traffic_stats (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    device_id   INT NOT NULL,
+    session_id  INT NOT NULL,
+    timestamp   DATETIME NOT NULL,
+    bytes_in    BIGINT DEFAULT 0,
+    bytes_out   BIGINT DEFAULT 0,
+    FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES device_sessions(id) ON DELETE CASCADE
+);
+```
+
+### 4. Fill in your own config values before the first run
+
+NetWatch currently keeps its configuration as constants at the top of each file rather than in a `.env`. Edit these before running:
+
+| File | What to set |
+|------|-------------|
+| `Textual.py` | `DB_CONFIG` — your MySQL host/user/password |
+| `arp_scan.py` | `AsyncTelegram(token=..., chat_id=...)` — your Telegram bot token and chat ID (used for new-device alerts) |
+| `bettercap.py` | the two `aiohttp.BasicAuth("YOUR_LOGIN", "YOUR_PASSWORD")` calls — must match whatever username/password Bettercap's REST API is configured with |
+| `vendor_recognition.py` | `BETTERCAP_AUTH` — same Bettercap REST API credentials, used by the fingerprinting scan |
+| `api_server.cap` | `set api.rest.username` / `set api.rest.password` — set these to the **same** credentials referenced above; also set `arp.spoof.targets` to your own LAN range |
+| `traffic_colector.py`, `bettercap.py`, `api_server.cap` | the network interface name (`wlp1s0`) — replace with your own, found via `ip link` |
+
+> ⚠️ As uploaded, `bettercap.py`'s two `BasicAuth("YOUR_LOGIN", "YOUR_PASSWORD")` calls are placeholder text, while `vendor_recognition.py` already has real-looking credentials (`"netwatch"`, `"192837465"`). These need to match each other and the `.cap` file, or Bettercap's REST API will reject the daemon's requests with 401s.
+
+### 5. Run the daemon
+
+No orchestration entrypoint (e.g. `main.py`) was included with the uploaded files — here's a minimal one that wires the existing pieces together, based on what each module already exposes:
+
+```python
+# main.py
+import asyncio
+import aiomysql
+
+from net_watch import arp_scan, traffic_colector, bettercap, control_api
+
+DB_CONFIG = dict(
+    host="127.0.0.1", port=3306,
+    user="YOUR_DB_USER", password="YOUR_DB_PASSWORD",
+    db="netwatch", autocommit=True,
+)
+
+async def main():
+    pool = await aiomysql.create_pool(**DB_CONFIG)
+    await traffic_colector.setup_iptables()
+
+    bettercap_process = await bettercap.start_bettercap(pool)
+    control_api_runner = await control_api.start_control_api()
+    asyncio.create_task(traffic_colector.collect_traffic_loop(pool))
+
+    try:
+        while True:
+            await arp_scan.check_device(pool)
+            await asyncio.sleep(10)
+    finally:
+        await control_api.stop_control_api(control_api_runner)
+        await bettercap.stop_bettercap(bettercap_process)
+        pool.close()
+        await pool.wait_closed()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+```bash
+sudo python3 main.py
+```
+
+(Root is required — the daemon configures `iptables`, enables `ip_forward`, and runs Bettercap, all of which need it.)
+
+### 6. Run the TUI
+
+In a separate terminal, once the daemon is running:
+
+```bash
+python3 Textual.py
+```
+
+The TUI connects to MySQL directly (read-only queries) and to the daemon's control API at `http://127.0.0.1:9090` for commands (block/unblock, pause/resume monitoring).
+
+### 7. Run the tests
+
+```bash
+pip install pytest --break-system-packages
+pytest
+```
+
+> ⚠️ **Legal & ethical use.** NetWatch performs ARP spoofing and intercepts DNS/HTTPS-SNI traffic for every device on the network it runs on. Only run it on a network you own or administer, with the knowledge of the people using it — intercepting someone else's network traffic without authorization is illegal in most jurisdictions, regardless of intent.
+
+## 📄 License
+
+This project is released under the **MIT License** — a short, permissive open-source license: anyone can use, copy, modify, and distribute the code, including commercially, as long as the original copyright notice is kept; the code is provided "as is," with no warranty. It's a common default for personal/portfolio projects because it gets out of the way without restricting how others use your work.
+
+See [`LICENSE`](./LICENSE) for the full text.

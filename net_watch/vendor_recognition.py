@@ -77,7 +77,7 @@ except ImportError:
 
 BETTERCAP_URL = "http://127.0.0.1:8081/api/session"
 EVENTS_URL = "http://127.0.0.1:8081/api/events"
-BETTERCAP_AUTH = HTTPBasicAuth("netwatch", "192837465")
+BETTERCAP_AUTH = HTTPBasicAuth("YOUR_LOGIN", "YOUR_PASSWORD")
 BETTERCAP_TIMEOUT = 3
 
 PORT_TIMEOUT = 0.5
